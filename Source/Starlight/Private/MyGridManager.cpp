@@ -18,6 +18,8 @@
 #include "BiomeType.h"
 #include "NiagaraFunctionLibrary.h"
 #include "BiomeBounds.h"
+#include "BiomeCluster.h"
+
 // Sets default values
 AMyGridManager::AMyGridManager()
 {
@@ -62,6 +64,9 @@ void AMyGridManager::BeginPlay()
 	Super::BeginPlay();
 	CellMesh->ClearInstances();
 	GridCells.Empty();
+	if (MapSeed == 0) MapSeed = FMath::RandRange(1, 1000000);
+	FMath::SRandInit(MapSeed);
+	SeedOffset = FVector2D(FMath::SRand() * 10000.f, FMath::SRand() * 10000.f);
 
 	const FVector GridOrigin = GetActorLocation();
 	float TargetScale = CellSize / 100.0f;
@@ -164,6 +169,9 @@ void AMyGridManager::BeginPlay()
 			NavSys->Build();
 		}
 	}
+	GenerateBiomeClusters();
+
+	SpawnStarsForTiles();
 	
 }
 
@@ -328,8 +336,22 @@ void AMyGridManager::SpawnAllGameplayActors()
 	SpawnRandomActors(LightShardClass, LightShardCount);
 	for (UBiomeData* Biome : Biomes)
 	{
-		SpawnStarsParticlesForBiome(Biome);
-		SpawnRandomActors(Biome->EnemyMeleeAoEClass, FMath::RoundToInt((Biome->GetEnemySpawnRate() / 100) * BiomeCells[Biome->BiomeType].Num()), Biome->BiomeType);
+		const TArray<FIntPoint>* Cells = BiomeCells.Find(Biome->BiomeType);
+
+		if (!Cells)
+		{
+			continue;
+		}
+
+		int32 Count = FMath::RoundToInt(
+			(Biome->GetEnemySpawnRate() / 100.f) * Cells->Num()
+		);
+
+		SpawnRandomActors(
+			Biome->EnemyMeleeAoEClass,
+			Count,
+			Biome->BiomeType
+		);
 	}
 }
 UBiomeData* AMyGridManager::GetBiomeData(EBiomeType Type) const
@@ -346,7 +368,10 @@ UBiomeData* AMyGridManager::GetBiomeData(EBiomeType Type) const
 }
 EBiomeType AMyGridManager::DetermineBiome(int32 X, int32 Y)
 {
-	float Noise = FMath::PerlinNoise2D(FVector2D(X * 0.05f, Y * 0.05f));
+	float SampleX = (X * 0.05f) + SeedOffset.X;
+	float SampleY = (Y * 0.05f) + SeedOffset.Y;
+
+	float Noise = FMath::PerlinNoise2D(FVector2D(SampleX, SampleY));
 
 	if (Noise < 0.1f)
 		return EBiomeType::Nebula;
@@ -366,45 +391,160 @@ FVector AMyGridManager::ComputeBiomeCenter(const TArray<FIntPoint>& Tiles)
 	return Sum / Tiles.Num();
 }
 
-void AMyGridManager::SpawnStarsParticlesForBiome(UBiomeData* Biome) 
-{ 
-	const TArray<FIntPoint>* CellsPtr = BiomeCells.Find(Biome->BiomeType);
-
-	if (!CellsPtr || CellsPtr->Num() == 0)
+void AMyGridManager::SpawnStarsForTiles()
+{
+	for (const FBiomeCluster& Cluster: BiomeClusters)
 	{
-		return;
-	}
+		for (const FIntPoint& Tile : Cluster.Tiles) {
+			UBiomeData* Biome = GetBiomeData(Cluster.BiomeType);
+			if (FMath::FRand() > 0.3f)
+			{
+				continue;
+			}
+			if (!Biome || !Biome->StarSystem)
+				continue;
+			if (!Biome || !Biome->StarSystem || Biome->GetStarDensity() <= 0)
+			{
+				continue;
+			}
+			FVector TileCenter = GetTileWorldLocation(Tile);
 
-	const TArray<FIntPoint>& Cells = *CellsPtr;
-
-	FVector Center = ComputeBiomeCenter(Cells);
-
-	FBiomeBounds Bounds;
-
-	for (const FIntPoint& Cell : Cells)
-	{
-		Bounds.MinX = FMath::Min(Bounds.MinX, Cell.X);
-		Bounds.MaxX = FMath::Max(Bounds.MaxX, Cell.X);
-
-		Bounds.MinY = FMath::Min(Bounds.MinY, Cell.Y);
-		Bounds.MaxY = FMath::Max(Bounds.MaxY, Cell.Y);
-	}
-	float WidthTiles = Bounds.MaxX - Bounds.MinX + 1; 
-	float HeightTiles = Bounds.MaxY - Bounds.MinY + 1; 
-	float BiomeWidthWorld = WidthTiles * CellSize; 
-	float BiomeHeightWorld = HeightTiles * CellSize;
-	UNiagaraSystem* System = Biome->StarSystem; 
-	if (System) 
-	{ 
-		UNiagaraComponent* NiagaraComp = 
-			UNiagaraFunctionLibrary::SpawnSystemAtLocation(
-				GetWorld(), 
-				System, 
-				Center
+			UNiagaraComponent* NiagaraComp =
+				UNiagaraFunctionLibrary::SpawnSystemAttached(
+					Biome->StarSystem,
+					RootComponent,
+					NAME_None,
+					TileCenter,
+					FRotator::ZeroRotator,
+					EAttachLocation::KeepWorldPosition,
+					true
+				);
+			NiagaraComp->SetAutoDestroy(false);
+			NiagaraComp->SetComponentTickEnabled(false);
+			NiagaraComp->SetNiagaraVariableVec2(
+				TEXT("User.PlaneSize"),
+				FVector2D(CellSize, CellSize)
 			);
-		NiagaraComp->SetNiagaraVariableVec2(TEXT("User.PlaneSize"), FVector2D(BiomeWidthWorld, BiomeHeightWorld)); 
-		int StarCount = FMath::RoundToInt((BiomeWidthWorld * BiomeHeightWorld) * Biome->GetStarDensity()); 
-		StarCount = FMath::Max(StarCount, 1); 
-		NiagaraComp->SetNiagaraVariableInt(TEXT("User.SpawnCount"), StarCount); 
-	} 
+
+			int StarCount = FMath::RoundToInt(
+				CellSize * CellSize * Biome->GetStarDensity()
+			);
+
+			NiagaraComp->SetNiagaraVariableInt(
+				TEXT("User.SpawnCount"),
+				FMath::Max(1, StarCount)
+			);
+			if(Biome->BiomeType == EBiomeType::Nebula)
+			{
+				float RandValForColor = FMath::FRand();
+				if(RandValForColor < 0.25f)
+				{
+					NiagaraComp->SetNiagaraVariableLinearColor(
+						TEXT("User.NebulaStarColor"),
+						FLinearColor(0.44f, 0.f, 1.f, 1.f)
+					);
+				}
+				else if (RandValForColor < 0.5f)
+				{
+					NiagaraComp->SetNiagaraVariableLinearColor(
+						TEXT("User.NebulaStarColor"),
+						FLinearColor(0.f, 1.f, 0.67f, 1.f)
+					);
+				}
+				else if (RandValForColor < 0.75f)
+				{
+					NiagaraComp->SetNiagaraVariableLinearColor(
+						TEXT("User.NebulaStarColor"),
+						FLinearColor(1.f, 0.f, 0.32f, 1.f)
+					);
+				}
+				else
+				{
+					NiagaraComp->SetNiagaraVariableLinearColor(
+						TEXT("User.NebulaStarColor"),
+						FLinearColor(0.f, 1.f, 0.51f, 1.f)
+					);
+				}
+				
+			}
+		}
+	}
+}
+
+void AMyGridManager::GenerateBiomeClusters()
+{
+	BiomeClusters.Empty();
+	TSet<FIntPoint> Visited;
+
+	for (const auto& Elem : GridCells)
+	{
+		FIntPoint Start = Elem.Key;
+
+		if (Visited.Contains(Start))
+			continue;
+
+		FBiomeCluster Cluster;
+		Cluster.BiomeType = Elem.Value.Biome;
+
+		TQueue<FIntPoint> Queue;
+		Queue.Enqueue(Start);
+		Visited.Add(Start);
+
+		while (!Queue.IsEmpty())
+		{
+			FIntPoint Current;
+			Queue.Dequeue(Current);
+
+			Cluster.Tiles.Add(Current);
+
+			TArray<FIntPoint> Neighbors =
+			{
+				FIntPoint(Current.X + 1, Current.Y),
+				FIntPoint(Current.X - 1, Current.Y),
+				FIntPoint(Current.X, Current.Y + 1),
+				FIntPoint(Current.X, Current.Y - 1)
+			};
+
+			for (const FIntPoint& N : Neighbors)
+			{
+				if (!GridCells.Contains(N))
+					continue;
+
+				if (Visited.Contains(N))
+					continue;
+
+				if (GridCells[N].Biome != Cluster.BiomeType)
+					continue;
+
+				Visited.Add(N);
+				Queue.Enqueue(N);
+			}
+		}
+		if (Cluster.Tiles.Num() < 10) {
+			continue;
+		}
+		
+
+		Cluster.BiomeBounds.MinX = INT_MAX;
+		Cluster.BiomeBounds.MaxX = INT_MIN;
+		Cluster.BiomeBounds.MinY = INT_MAX;
+		Cluster.BiomeBounds.MaxY = INT_MIN;
+
+		for (const FIntPoint& Tile : Cluster.Tiles)
+		{
+			Cluster.BiomeBounds.MinX = FMath::Min(Cluster.BiomeBounds.MinX, Tile.X);
+			Cluster.BiomeBounds.MaxX = FMath::Max(Cluster.BiomeBounds.MaxX, Tile.X);
+			Cluster.BiomeBounds.MinY = FMath::Min(Cluster.BiomeBounds.MinY, Tile.Y);
+			Cluster.BiomeBounds.MaxY = FMath::Max(Cluster.BiomeBounds.MaxY, Tile.Y);
+		}
+		float CenterX = (Cluster.BiomeBounds.MinX + Cluster.BiomeBounds.MaxX) * 0.5f;
+		float CenterY = (Cluster.BiomeBounds.MinY + Cluster.BiomeBounds.MaxY) * 0.5f;
+
+		Cluster.Center = GetActorLocation() + FVector(
+			(CenterX + 0.5f) * CellSize,
+			(CenterY + 0.5f) * CellSize,
+			0.f
+		);
+		BiomeClusters.Add(Cluster);
+	}
 }

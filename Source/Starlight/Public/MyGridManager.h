@@ -1,9 +1,10 @@
 #pragma once
 #include "BiomeBounds.h"
-#include "MyGridCell.h"
+#include "BiomeCluster.h"
 #include "BiomeType.h"
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "MyGridCell.h"
 #include "MyGridManager.generated.h"
 class UInstancedStaticMeshComponent; class UBoxComponent; class ANavMeshBoundsVolume; class UBiomeData;
 UCLASS()
@@ -82,6 +83,9 @@ public:
 	UFUNCTION(BlueprintCallable)
 	EBiomeType DetermineBiome(int32 X, int32 Y);
 
+	UPROPERTY(EditAnywhere, Category = "Generation")
+	int32 MapSeed;
+
 protected:
 	// Called when the game starts or when spawned
 	virtual void BeginPlay() override;
@@ -90,9 +94,11 @@ private:
 
 	TMap<FIntPoint, FMyGridCell> GridCells;
 	TMap<EBiomeType, TArray<FIntPoint>> BiomeCells;
-
+	TArray<FBiomeCluster> BiomeClusters;
 	FVector ComputeBiomeCenter(const TArray<FIntPoint>& Tile);
 
-	void SpawnStarsParticlesForBiome(UBiomeData* Biome);
+	void SpawnStarsForTiles();
+	FVector2D SeedOffset;
+	void GenerateBiomeClusters();
 
 };
